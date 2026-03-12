@@ -1597,11 +1597,401 @@ const DataImportView = () => {
   );
 };
 
+// ─── FIX BAD SALES VIEW ─────────────────────────────────────────────────────
+const BAD_STATUSES = ["Cannot Process","Denied","Chargeback","TPV Not Complete","Duplicate","Awaiting Client Update"];
+const FIXABLE_STATUSES = Object.keys(STATUS_CONFIG);
+
+const FixBadSalesView = () => {
+  const [records, setRecords] = useState(() =>
+    CONTACTS.filter(c => BAD_STATUSES.includes(c.status)).map(c => ({...c, _notes:"", _resolved:false}))
+  );
+  const [filterStatus, setFilterStatus] = useState("all");
+  const [filterRep, setFilterRep] = useState("all");
+  const [sortBy, setSortBy] = useState("status");
+  const [editingId, setEditingId] = useState(null);
+  const [editFields, setEditFields] = useState({});
+  const [bulkSelected, setBulkSelected] = useState(new Set());
+  const [showBulkPanel, setShowBulkPanel] = useState(false);
+  const [bulkAction, setBulkAction] = useState("");
+  const [resolvedCount, setResolvedCount] = useState(0);
+  const [toast, setToast] = useState(null);
+
+  const showToast = (msg, color=T.green) => { setToast({msg,color}); setTimeout(()=>setToast(null), 3000); };
+
+  // Filtered + sorted records
+  const visible = useMemo(() => {
+    let out = records.filter(r => !r._resolved);
+    if (filterStatus !== "all") out = out.filter(r => r.status === filterStatus);
+    if (filterRep !== "all") out = out.filter(r => r.rep === filterRep);
+    if (sortBy === "status") out.sort((a,b) => a.status.localeCompare(b.status));
+    else if (sortBy === "rep") out.sort((a,b) => a.rep.localeCompare(b.rep));
+    else if (sortBy === "date") out.sort((a,b) => new Date(b.saleDate) - new Date(a.saleDate));
+    else if (sortBy === "commission") out.sort((a,b) => b.commissionEst - a.commissionEst);
+    return out;
+  }, [records, filterStatus, filterRep, sortBy]);
+
+  // Issue grouping for summary cards
+  const issueGroups = useMemo(() => {
+    const unresolved = records.filter(r => !r._resolved);
+    const groups = {};
+    BAD_STATUSES.forEach(s => { groups[s] = unresolved.filter(r => r.status === s); });
+    return groups;
+  }, [records]);
+
+  const totalAtRisk = useMemo(() =>
+    records.filter(r => !r._resolved).reduce((sum, r) => sum + r.commissionEst, 0)
+  , [records]);
+
+  const repsInvolved = useMemo(() =>
+    [...new Set(records.filter(r => !r._resolved).map(r => r.rep))]
+  , [records]);
+
+  // Start editing a record
+  const startEdit = (rec) => {
+    setEditingId(rec.id);
+    setEditFields({ status:rec.status, utility:rec.utility, rep:rec.rep, lmiVerified:rec.lmiVerified, notes:rec._notes });
+  };
+
+  const cancelEdit = () => { setEditingId(null); setEditFields({}); };
+
+  const saveEdit = (id) => {
+    setRecords(prev => prev.map(r => r.id === id ? {
+      ...r, status:editFields.status, utility:editFields.utility,
+      rep:editFields.rep, lmiVerified:editFields.lmiVerified, _notes:editFields.notes
+    } : r));
+    setEditingId(null);
+    setEditFields({});
+    showToast("Record updated — changes saved");
+  };
+
+  const resolveRecord = (id) => {
+    setRecords(prev => prev.map(r => r.id === id ? {...r, _resolved:true} : r));
+    setResolvedCount(c => c + 1);
+    showToast("Marked as resolved ✓");
+  };
+
+  // Bulk operations
+  const toggleBulk = (id) => {
+    setBulkSelected(prev => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+  };
+
+  const selectAllVisible = () => {
+    if (bulkSelected.size === visible.length) setBulkSelected(new Set());
+    else setBulkSelected(new Set(visible.map(r => r.id)));
+  };
+
+  const applyBulkAction = () => {
+    if (!bulkAction || bulkSelected.size === 0) return;
+    if (bulkAction === "resolve") {
+      setRecords(prev => prev.map(r => bulkSelected.has(r.id) ? {...r, _resolved:true} : r));
+      setResolvedCount(c => c + bulkSelected.size);
+      showToast(`${bulkSelected.size} records resolved`);
+    } else if (FIXABLE_STATUSES.includes(bulkAction)) {
+      setRecords(prev => prev.map(r => bulkSelected.has(r.id) ? {...r, status:bulkAction} : r));
+      showToast(`${bulkSelected.size} records → ${bulkAction}`);
+    }
+    setBulkSelected(new Set());
+    setShowBulkPanel(false);
+    setBulkAction("");
+  };
+
+  const unresolvedCount = records.filter(r => !r._resolved).length;
+
+  const selectStyle = { background:T.surface, color:T.text, border:`1px solid ${T.border}`,
+    borderRadius:"6px", padding:"6px 10px", fontSize:"11px", outline:"none", cursor:"pointer" };
+
+  return (
+    <div style={{ maxWidth:"1400px" }}>
+      {/* Toast */}
+      {toast && (
+        <div style={{ position:"fixed",top:"20px",right:"24px",zIndex:9999,
+          background:toast.color,color:"#000",padding:"10px 20px",borderRadius:"8px",
+          fontSize:"12px",fontWeight:"700",boxShadow:`0 4px 20px ${toast.color}40`,
+          animation:"fadeIn 0.2s" }}>
+          {toast.msg}
+        </div>
+      )}
+
+      {/* Header summary */}
+      <div style={{ display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(180px,1fr))",gap:"12px",marginBottom:"20px" }}>
+        <KPI label="Bad Sales" value={unresolvedCount} sub={`of ${records.length} flagged total`}
+          color={T.red} icon={Icons.alertCircle}/>
+        <KPI label="Commission at Risk" value={`$${Math.round(totalAtRisk).toLocaleString()}`}
+          sub="recoverable if fixed" color={T.amber} icon={Icons.dollar}/>
+        <KPI label="Resolved Today" value={resolvedCount}
+          sub={records.length > 0 ? `${Math.round(resolvedCount/records.length*100)}% completion` : "0%"}
+          color={T.green} icon={Icons.check}/>
+        <KPI label="Reps Affected" value={repsInvolved.length}
+          sub={`of ${REPS.length} total reps`} color={T.purple} icon={Icons.users}/>
+      </div>
+
+      {/* Issue breakdown cards */}
+      <Card style={{ marginBottom:"20px",padding:"16px 20px" }}>
+        <SectionTitle>Issue Breakdown — Click to Filter</SectionTitle>
+        <div style={{ display:"flex",flexWrap:"wrap",gap:"8px" }}>
+          <div onClick={()=>setFilterStatus("all")} style={{ cursor:"pointer",padding:"8px 14px",
+            borderRadius:"8px",fontSize:"11px",fontWeight:"600",
+            background:filterStatus==="all"?T.accentGlow:T.surface,
+            color:filterStatus==="all"?T.accent:T.muted,
+            border:`1px solid ${filterStatus==="all"?T.accent:T.border}`,transition:"all 0.15s" }}>
+            All ({unresolvedCount})
+          </div>
+          {BAD_STATUSES.map(s => {
+            const cnt = issueGroups[s]?.length || 0;
+            const cfg = STATUS_CONFIG[s];
+            if (cnt === 0) return null;
+            return (
+              <div key={s} onClick={()=>setFilterStatus(filterStatus===s?"all":s)}
+                style={{ cursor:"pointer",padding:"8px 14px",borderRadius:"8px",fontSize:"11px",fontWeight:"600",
+                  background:filterStatus===s?cfg.bg:T.surface,
+                  color:filterStatus===s?cfg.color:T.muted,
+                  border:`1px solid ${filterStatus===s?cfg.color:T.border}`,
+                  transition:"all 0.15s",display:"flex",alignItems:"center",gap:"6px" }}>
+                <span style={{ width:"6px",height:"6px",borderRadius:"50%",background:cfg.color }}/>
+                {cfg.label} ({cnt})
+              </div>
+            );
+          })}
+        </div>
+      </Card>
+
+      {/* Controls bar */}
+      <Card style={{ marginBottom:"16px",padding:"12px 16px",display:"flex",alignItems:"center",gap:"12px",flexWrap:"wrap" }}>
+        <div style={{ display:"flex",alignItems:"center",gap:"6px" }}>
+          <Icons.filter s={13} c={T.muted}/>
+          <span style={{ fontSize:"11px",color:T.muted,fontWeight:"600" }}>Rep:</span>
+          <select value={filterRep} onChange={e=>setFilterRep(e.target.value)} style={selectStyle}>
+            <option value="all">All Reps</option>
+            {REPS.map(r => <option key={r.id} value={r.name}>{r.name}</option>)}
+          </select>
+        </div>
+        <div style={{ display:"flex",alignItems:"center",gap:"6px" }}>
+          <span style={{ fontSize:"11px",color:T.muted,fontWeight:"600" }}>Sort:</span>
+          <select value={sortBy} onChange={e=>setSortBy(e.target.value)} style={selectStyle}>
+            <option value="status">By Issue Type</option>
+            <option value="commission">By Commission $</option>
+            <option value="rep">By Rep</option>
+            <option value="date">By Sale Date</option>
+          </select>
+        </div>
+        <div style={{ marginLeft:"auto",display:"flex",alignItems:"center",gap:"8px" }}>
+          {bulkSelected.size > 0 && (
+            <div style={{ display:"flex",alignItems:"center",gap:"8px" }}>
+              <span style={{ fontSize:"11px",color:T.accent,fontWeight:"600" }}>
+                {bulkSelected.size} selected
+              </span>
+              <select value={bulkAction} onChange={e=>setBulkAction(e.target.value)} style={selectStyle}>
+                <option value="">Bulk action...</option>
+                <option value="resolve">✓ Mark Resolved</option>
+                <option value="Payable">→ Set Payable</option>
+                <option value="Processed">→ Set Processed</option>
+                <option value="Sent">→ Set Sent</option>
+                <option value="Awaiting Client Update">→ Set Awaiting</option>
+              </select>
+              <Btn onClick={applyBulkAction} style={{ padding:"5px 12px",fontSize:"10px" }}>Apply</Btn>
+            </div>
+          )}
+          <div onClick={selectAllVisible} style={{ cursor:"pointer",padding:"5px 10px",borderRadius:"6px",
+            fontSize:"10px",color:T.muted,border:`1px solid ${T.border}`,fontWeight:"600" }}>
+            {bulkSelected.size === visible.length && visible.length > 0 ? "Deselect All" : "Select All"}
+          </div>
+        </div>
+      </Card>
+
+      {/* Records table */}
+      <Card style={{ padding:0,overflow:"hidden" }}>
+        <div style={{ overflowX:"auto" }}>
+          <table style={{ width:"100%",borderCollapse:"collapse",fontSize:"12px" }}>
+            <thead>
+              <tr style={{ background:T.surface }}>
+                <th style={{ padding:"10px 12px",textAlign:"left",color:T.muted,fontWeight:"600",fontSize:"10px",
+                  textTransform:"uppercase",letterSpacing:"0.06em",borderBottom:`1px solid ${T.border}`,width:"32px" }}>
+                  <div style={{ width:"14px",height:"14px",borderRadius:"3px",border:`1.5px solid ${T.muted}`,
+                    cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",
+                    background:bulkSelected.size===visible.length&&visible.length>0?T.accent:"transparent" }}
+                    onClick={selectAllVisible}>
+                    {bulkSelected.size===visible.length&&visible.length>0 &&
+                      <Icons.check s={10} c="#000"/>}
+                  </div>
+                </th>
+                {["Customer","Account #","Status","Utility","Rep","kWh","Commission","LMI","Sale Date","Actions"].map(h=>(
+                  <th key={h} style={{ padding:"10px 12px",textAlign:"left",color:T.muted,fontWeight:"600",
+                    fontSize:"10px",textTransform:"uppercase",letterSpacing:"0.06em",
+                    borderBottom:`1px solid ${T.border}`,whiteSpace:"nowrap" }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {visible.length === 0 && (
+                <tr><td colSpan={11} style={{ padding:"40px",textAlign:"center",color:T.muted }}>
+                  {unresolvedCount === 0 ? (
+                    <div>
+                      <div style={{ fontSize:"24px",marginBottom:"8px" }}>🎉</div>
+                      <div style={{ fontWeight:"600",marginBottom:"4px" }}>All clear!</div>
+                      <div style={{ fontSize:"11px" }}>Every flagged record has been resolved.</div>
+                    </div>
+                  ) : "No records match current filters."}
+                </td></tr>
+              )}
+              {visible.map(rec => {
+                const isEditing = editingId === rec.id;
+                const cfg = STATUS_CONFIG[rec.status];
+                const isSelected = bulkSelected.has(rec.id);
+                return (
+                  <tr key={rec.id} style={{ borderBottom:`1px solid ${T.border}`,
+                    background:isSelected?`${T.accent}08`:isEditing?`${T.amber}08`:"transparent",
+                    transition:"background 0.15s" }}>
+                    {/* Checkbox */}
+                    <td style={{ padding:"8px 12px" }}>
+                      <div onClick={()=>toggleBulk(rec.id)}
+                        style={{ width:"14px",height:"14px",borderRadius:"3px",cursor:"pointer",
+                          border:`1.5px solid ${isSelected?T.accent:T.muted}`,
+                          background:isSelected?T.accent:"transparent",
+                          display:"flex",alignItems:"center",justifyContent:"center" }}>
+                        {isSelected && <Icons.check s={10} c="#000"/>}
+                      </div>
+                    </td>
+                    {/* Customer */}
+                    <td style={{ padding:"8px 12px",fontWeight:"500" }}>
+                      <div>{rec.name}</div>
+                      <div style={{ fontSize:"10px",color:T.muted }}>{rec.phone}</div>
+                    </td>
+                    {/* Account */}
+                    <td style={{ padding:"8px 12px",fontFamily:"monospace",fontSize:"11px",color:T.textSecondary }}>
+                      {rec.account}
+                    </td>
+                    {/* Status */}
+                    <td style={{ padding:"8px 12px" }}>
+                      {isEditing ? (
+                        <select value={editFields.status} onChange={e=>setEditFields({...editFields,status:e.target.value})}
+                          style={{...selectStyle,borderColor:STATUS_CONFIG[editFields.status]?.color||T.border}}>
+                          {FIXABLE_STATUSES.map(s=><option key={s} value={s}>{s}</option>)}
+                        </select>
+                      ) : <Badge status={rec.status}/>}
+                    </td>
+                    {/* Utility */}
+                    <td style={{ padding:"8px 12px" }}>
+                      {isEditing ? (
+                        <select value={editFields.utility} onChange={e=>setEditFields({...editFields,utility:e.target.value})}
+                          style={selectStyle}>
+                          {Object.keys(UTILITY_COLORS).map(u=><option key={u} value={u}>{u}</option>)}
+                        </select>
+                      ) : (
+                        <span style={{ fontSize:"11px",color:UTILITY_COLORS[rec.utility]||T.muted }}>
+                          {rec.utility}
+                        </span>
+                      )}
+                    </td>
+                    {/* Rep */}
+                    <td style={{ padding:"8px 12px" }}>
+                      {isEditing ? (
+                        <select value={editFields.rep} onChange={e=>setEditFields({...editFields,rep:e.target.value})}
+                          style={selectStyle}>
+                          {REPS.map(r=><option key={r.id} value={r.name}>{r.name}</option>)}
+                        </select>
+                      ) : (
+                        <span style={{ fontSize:"11px" }}>{rec.rep}</span>
+                      )}
+                    </td>
+                    {/* kWh */}
+                    <td style={{ padding:"8px 12px",fontFamily:"monospace",fontSize:"11px" }}>
+                      {rec.kwh.toLocaleString()}
+                    </td>
+                    {/* Commission */}
+                    <td style={{ padding:"8px 12px" }}>
+                      <span style={{ fontFamily:"monospace",fontSize:"11px",color:T.amber,fontWeight:"600" }}>
+                        ${Math.round(rec.commissionEst).toLocaleString()}
+                      </span>
+                    </td>
+                    {/* LMI */}
+                    <td style={{ padding:"8px 12px" }}>
+                      {isEditing ? (
+                        <div onClick={()=>setEditFields({...editFields,lmiVerified:!editFields.lmiVerified})}
+                          style={{ width:"14px",height:"14px",borderRadius:"3px",cursor:"pointer",
+                            background:editFields.lmiVerified?T.green:T.surface,
+                            border:`1.5px solid ${editFields.lmiVerified?T.green:T.muted}`,
+                            display:"flex",alignItems:"center",justifyContent:"center" }}>
+                          {editFields.lmiVerified && <Icons.check s={10} c="#000"/>}
+                        </div>
+                      ) : (
+                        <span style={{ color:rec.lmiVerified?T.green:T.red,fontSize:"11px",fontWeight:"600" }}>
+                          {rec.lmiVerified ? "✓" : "✗"}
+                        </span>
+                      )}
+                    </td>
+                    {/* Sale Date */}
+                    <td style={{ padding:"8px 12px",fontSize:"11px",color:T.textSecondary,whiteSpace:"nowrap" }}>
+                      {rec.saleDate}
+                    </td>
+                    {/* Actions */}
+                    <td style={{ padding:"8px 12px" }}>
+                      {isEditing ? (
+                        <div style={{ display:"flex",gap:"6px" }}>
+                          <div onClick={()=>saveEdit(rec.id)} title="Save"
+                            style={{ cursor:"pointer",padding:"4px 8px",borderRadius:"5px",
+                              background:T.greenDim,color:T.green,fontSize:"10px",fontWeight:"700" }}>Save</div>
+                          <div onClick={cancelEdit} title="Cancel"
+                            style={{ cursor:"pointer",padding:"4px 8px",borderRadius:"5px",
+                              background:T.redDim,color:T.red,fontSize:"10px",fontWeight:"700" }}>Cancel</div>
+                        </div>
+                      ) : (
+                        <div style={{ display:"flex",gap:"6px" }}>
+                          <div onClick={()=>startEdit(rec)} title="Edit"
+                            style={{ cursor:"pointer",padding:"4px 8px",borderRadius:"5px",
+                              background:T.accentDim,color:T.accent,fontSize:"10px",fontWeight:"700" }}>Edit</div>
+                          <div onClick={()=>resolveRecord(rec.id)} title="Resolve"
+                            style={{ cursor:"pointer",padding:"4px 8px",borderRadius:"5px",
+                              background:T.greenDim,color:T.green,fontSize:"10px",fontWeight:"700" }}>Fix ✓</div>
+                        </div>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+
+      {/* Quick-fix guide */}
+      <Card style={{ marginTop:"16px",padding:"16px 20px" }}>
+        <SectionTitle>Quick Fix Playbook</SectionTitle>
+        <div style={{ display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(280px,1fr))",gap:"12px" }}>
+          {[
+            { status:"Cannot Process", fix:"Check account # + utility mismatch. Verify address matches utility zone. Re-submit with corrected info.", color:T.red },
+            { status:"TPV Not Complete", fix:"Contact customer to reschedule TPV call. Ensure correct phone # on file. Rep should warm-transfer.", color:T.amber },
+            { status:"Denied", fix:"Check denial reason from partner portal. Usually: duplicate account, invalid address, or credit issue.", color:T.amber },
+            { status:"Chargeback", fix:"Verify customer signed. Pull TPV recording. If valid — dispute with partner. If invalid — deduct from rep.", color:T.red },
+            { status:"Duplicate", fix:"Compare account #s. Keep the newer enrollment if utility matches. Mark older as resolved.", color:T.muted },
+            { status:"Awaiting Client Update", fix:"Customer needs to provide info (bill, ID, etc). Follow up via SMS/call within 48hrs or it expires.", color:T.accent },
+          ].map(item => {
+            const cfg = STATUS_CONFIG[item.status];
+            return (
+              <div key={item.status} style={{ padding:"12px",borderRadius:"8px",background:T.surface,
+                border:`1px solid ${T.border}` }}>
+                <div style={{ display:"flex",alignItems:"center",gap:"6px",marginBottom:"8px" }}>
+                  <Badge status={item.status} small/>
+                </div>
+                <div style={{ fontSize:"11px",color:T.textSecondary,lineHeight:"1.5" }}>{item.fix}</div>
+              </div>
+            );
+          })}
+        </div>
+      </Card>
+    </div>
+  );
+};
+
 // ─── APP SHELL ───────────────────────────────────────────────────────────────
 const NAV = [
   { id:"dashboard",label:"Dashboard",icon:Icons.dashboard },
   { id:"contacts",label:"Contacts",icon:Icons.users },
   { id:"pipeline",label:"Pipeline",icon:Icons.bar },
+  { id:"fixsales",label:"Fix Bad Sales",icon:Icons.alertCircle },
   { id:"reps",label:"Reps",icon:Icons.award },
   { id:"territories",label:"Territories",icon:Icons.map },
   { id:"commissions",label:"Commissions",icon:Icons.dollar },
@@ -1611,6 +2001,7 @@ const NAV = [
 
 const PAGE_LABELS = {
   dashboard:"Operations Dashboard",contacts:"Customer Contacts",pipeline:"Enrollment Pipeline",
+  fixsales:"Fix Bad Sales",
   reps:"Rep Management",territories:"Territory Intelligence",commissions:"Commission Tracking",
   insights:"AI Insights",
   import:"Data Import",
@@ -1624,6 +2015,7 @@ function App() {
 
   const VIEW = {
     dashboard:<Dashboard/>,contacts:<ContactsView/>,pipeline:<PipelineView/>,
+    fixsales:<FixBadSalesView/>,
     reps:<RepsView/>,territories:<TerritoriesView/>,commissions:<CommissionsView/>,
     insights:<InsightsView/>,
     import:<DataImportView/>,
@@ -1652,7 +2044,7 @@ function App() {
           <div style={{ padding:"6px 20px 4px",fontSize:"9px",color:T.muted,textTransform:"uppercase",letterSpacing:"0.12em",fontWeight:"700" }}>
             Main
           </div>
-          {NAV.slice(0,3).map(n=>(
+          {NAV.slice(0,4).map(n=>(
             <div key={n.id} onClick={()=>setActive(n.id)}
               style={{ display:"flex",alignItems:"center",gap:"10px",padding:"9px 20px",cursor:"pointer",
                 transition:"all 0.15s",
@@ -1661,12 +2053,16 @@ function App() {
                 borderLeft:active===n.id?`2px solid ${T.accent}`:"2px solid transparent",
                 fontSize:"12px",fontWeight:active===n.id?"600":"400" }}>
               <n.icon s={14} c={active===n.id?T.accent:T.muted}/> {n.label}
+              {n.id==="fixsales" && (
+                <span style={{ marginLeft:"auto",fontSize:"9px",padding:"2px 6px",
+                  background:T.redDim,borderRadius:"3px",color:T.red,fontWeight:"700" }}>!</span>
+              )}
             </div>
           ))}
           <div style={{ padding:"14px 20px 4px",fontSize:"9px",color:T.muted,textTransform:"uppercase",letterSpacing:"0.12em",fontWeight:"700" }}>
             Management
           </div>
-          {NAV.slice(3).map(n=>(
+          {NAV.slice(4).map(n=>(
             <div key={n.id} onClick={()=>setActive(n.id)}
               style={{ display:"flex",alignItems:"center",gap:"10px",padding:"9px 20px",cursor:"pointer",
                 transition:"all 0.15s",
